@@ -1,0 +1,6 @@
+*.pem
+credentials.yml
+*.tfvars
+*.tfstate*
+plan
+.terraform

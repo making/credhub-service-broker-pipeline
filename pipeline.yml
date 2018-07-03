@@ -1,0 +1,142 @@
+---
+resource_types:
+- name: pivnet
+  type: docker-image
+  source:
+    repository: pivotalcf/pivnet-resource
+    tag: latest-final
+
+resources:
+- name: pcf-pipelines
+  type: git
+  source:
+    uri: https://github.com/pivotal-cf/pcf-pipelines.git
+    tag_filter: v0.23.5
+- name: pivnet-product
+  type: pivnet
+  source:
+    api_token: ((pivnet_api_token))
+    product_slug: credhub-service-broker
+
+jobs:
+- name: upload-product
+  build_logs_to_retain: 5
+  serial: true
+  plan:
+  - aggregate:
+    - get: pcf-pipelines
+    - get: pivnet-product
+      params:
+        globs:
+        - "*.pivotal"
+  - task: upload-tile
+    file: pcf-pipelines/tasks/upload-product-and-stemcell/task.yml
+    params:
+      OPSMAN_DOMAIN_OR_IP_ADDRESS: ((opsman_domain_or_ip_address))
+      OPSMAN_CLIENT_ID: ""
+      OPSMAN_CLIENT_SECRET: ""
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+      PIVNET_API_TOKEN: ((pivnet_api_token))
+      NO_PROXY: ""
+      OM_IP: ""
+      IAAS: ((iaas))
+  - task: stage-tile
+    file: pcf-pipelines/tasks/stage-product/task.yml
+    params:
+      OPSMAN_DOMAIN_OR_IP_ADDRESS: ((opsman_domain_or_ip_address))
+      OPSMAN_CLIENT_ID: ""
+      OPSMAN_CLIENT_SECRET: ""
+      OPSMAN_USERNAME: ((ops_mgr_usr))
+      OPSMAN_PASSWORD: ((ops_mgr_pwd))
+
+- name: configure-product
+  build_logs_to_retain: 5
+  serial: true
+  plan:
+  - aggregate:
+    - get: pivnet-product
+      params:
+        globs:
+        - "*.pivotal"
+      passed:
+      - upload-product
+      trigger: true
+  - task: configure-product
+    params:
+      OPSMAN_DOMAIN_OR_IP_ADDRESS: ((opsman_domain_or_ip_address))
+      OPS_MGR_USR: ((ops_mgr_usr))
+      OPS_MGR_PWD: ((ops_mgr_pwd))
+      PRODUCT_NAME: credhub-service-broker
+      SERVICE_NAMEWORK_NAME: ((service-network-name))
+    config:
+      platform: linux
+      image_resource:
+        type: docker-image
+        source:
+          repository: pcfnorm/rootfs
+          tag: 1.0.14
+      run:
+        path: bash
+        args: 
+        - -c
+        - |
+          set -e
+          cp /usr/local/bin/om-linux /usr/local/bin/om
+
+          cat <<EOF > config.yml
+          ---
+          network-properties:
+            network:
+              name: $SERVICE_NAMEWORK_NAME
+            other_availability_zones:
+            - name: "null"
+            singleton_availability_zone:
+              name: "null"
+          EOF
+
+          cat config.yml
+
+          om --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+             --username "$OPS_MGR_USR" \
+             --password "$OPS_MGR_PWD" \
+             --skip-ssl-validation \
+             configure-product \
+             --product-name "${PRODUCT_NAME}" \
+             --config config.yml
+
+          # Errands
+          for e in \
+            deploy-all \
+            ;do
+            om --target "https://${OPSMAN_DOMAIN_OR_IP_ADDRESS}" \
+             --username "$OPS_MGR_USR" \
+             --password "$OPS_MGR_PWD" \
+             --skip-ssl-validation \
+             set-errand-state \
+             --product-name "${PRODUCT_NAME}" \
+             --errand-name="${e}" \
+             --post-deploy-state=when-changed
+          done
+
+- name: deploy-product
+  build_logs_to_retain: 5
+  serial: true
+  plan:
+  - aggregate:
+    - get: pivnet-product
+      params:
+        globs:
+        - "*.pivotal"
+      passed:
+      - configure-product
+      trigger: true
+    - get: pcf-pipelines
+  - task: deploy-product
+    file: pcf-pipelines/tasks/apply-changes/task.yml
+    params:
+      OPSMAN_DOMAIN_OR_IP_ADDRESS: ((opsman_domain_or_ip_address))
+      OPSMAN_USERNAME: ((ops_mgr_usr))
+      OPSMAN_PASSWORD: ((ops_mgr_pwd))
+      OPSMAN_CLIENT_ID: ""
+      OPSMAN_CLIENT_SECRET: ""
